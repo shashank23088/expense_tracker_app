@@ -10,6 +10,7 @@ VERSION_NAME=${VERSION_NAME:-1.0.0}; VERSION_CODE=${VERSION_CODE:-1}
 
 rm -rf "$B"; mkdir -p "$B"/{gen,classes,assets/www} dist
 cp web/index.html web/app.css web/app.js web/icon-192.png "$B/assets/www/"
+sed -i "s/^const APP_VERSION = .*/const APP_VERSION = '$VERSION_NAME';/" "$B/assets/www/app.js"
 
 aapt package -f -M "$A/AndroidManifest.xml" -S "$A/res" -A "$B/assets" -I "$JAR" -J "$B/gen" \
   --min-sdk-version 24 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
@@ -21,9 +22,14 @@ javac -nowarn -Xlint:-options --release 8 -cp "$JAR" -d "$B/classes" \
 zipalign -f -p 4 "$B/unsigned.apk" "$B/aligned.apk"
 
 # Keep this keystore! Updates must be signed with the same key or Android refuses to install over the old app.
-KS=$ROOT/release.keystore
-[ -f "$KS" ] || keytool -genkeypair -keystore "$KS" -alias expenses -keyalg RSA -keysize 2048 -validity 10000 \
-  -storepass expenses -keypass expenses -dname "CN=Local Expense Tracker" >/dev/null 2>&1
-apksigner sign --ks "$KS" --ks-pass pass:expenses --key-pass pass:expenses --out dist/ExpenseTracker.apk "$B/aligned.apk"
+KS=${KEYSTORE:-$ROOT/release.keystore}
+KS_PASS=${KS_PASS:-expenses}
+if [ ! -f "$KS" ]; then
+  # never mint a new key in CI: that would produce an APK that can't update the installed app
+  [ -n "${CI:-}" ] && { echo "No keystore at $KS (set the KEYSTORE_B64 secret)" >&2; exit 1; }
+  keytool -genkeypair -keystore "$KS" -alias expenses -keyalg RSA -keysize 2048 -validity 10000 \
+    -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=Local Expense Tracker" >/dev/null 2>&1
+fi
+apksigner sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" --out dist/ExpenseTracker.apk "$B/aligned.apk"
 apksigner verify --print-certs dist/ExpenseTracker.apk | head -2
 ls -lh dist/ExpenseTracker.apk

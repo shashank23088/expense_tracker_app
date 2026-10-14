@@ -36,7 +36,7 @@ const freshState = () => ({
   version: 1,
   settings: {
     currency: 'INR', locale: 'en-IN', income: 0, fyStart: 0, theme: 'auto',
-    ai: { provider: 'auto', url: 'http://127.0.0.1:11434', model: 'qwen2.5:1.5b', key: '', enabled: true },
+    ai: { url: 'http://127.0.0.1:11434', model: 'qwen2.5:1.5b', key: '', enabled: true },
   },
   categories: DEFAULT_CATS.map(([id, name, icon, kind]) => ({ id, name, icon, kind, budget: 0 })),
   tx: [],
@@ -44,7 +44,6 @@ const freshState = () => ({
   chat: [],
 });
 
-const HOSTED = typeof window.claude?.use === 'function'; // running as a claude.ai artifact
 const Store = {
   native: typeof window.AndroidBridge !== 'undefined',
   load() {
@@ -59,64 +58,9 @@ const Store = {
     try {
       if (this.native) { if (!window.AndroidBridge.save(raw)) throw new Error('native save failed'); }
       else localStorage.setItem('expense-tracker-v1', raw);
-    } catch (e) { if (!Cloud) toast('⚠️ Could not save: ' + e.message); }
-    if (Cloud) Cloud.schedule();
+    } catch (e) { toast('⚠️ Could not save: ' + e.message); }
   },
 };
-
-/* Private per-user cloud store (hosted version only). One `meta` doc + one doc per month of entries,
-   under data/users/<id>/, which nobody else (the artifact owner included) can read. */
-let Cloud = null;
-function toDocs(st) {
-  const docs = { meta: { settings: st.settings, categories: st.categories, recurring: st.recurring, chat: st.chat, lastCat: st._lastCat || null, version: st.version } };
-  for (const t of st.tx) (docs['m-' + t.date.slice(0, 7)] ||= { tx: [] }).tx.push(t);
-  return docs;
-}
-function fromDocs(snaps) {
-  const st = { tx: [] };
-  for (const d of snaps) {
-    const b = d.data();
-    if (d.id === 'meta') Object.assign(st, { settings: b.settings, categories: b.categories, recurring: b.recurring || [], chat: b.chat || [], _lastCat: b.lastCat || undefined, version: b.version || 1 });
-    else if (d.id.startsWith('m-')) st.tx.push(...(b.tx || []));
-  }
-  return st.settings ? st : null;
-}
-async function initCloud() {
-  if (!HOSTED) return;
-  try {
-    const [db, user] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
-    const uid = db && user ? await user.id() : null;
-    if (!uid) return;
-    const col = db.collection('data/users/' + uid);
-    const written = {};
-    let timer = null, chain = Promise.resolve(), pending = 0;
-    const flush = () => {
-      const docs = toDocs(S);
-      for (const k of Object.keys(written)) if (!docs[k] && k.startsWith('m-')) docs[k] = { tx: [] };
-      for (const [k, body] of Object.entries(docs)) {
-        const json = JSON.stringify(body);
-        if (written[k] === json) continue;
-        pending++;
-        chain = chain.then(() => col.doc(k).set(body)).then(() => { written[k] = json; },
-          e => toast(e.code === 'quota_exceeded' ? 'Storage full — export a backup and delete old data.' : e.code === 'invalid_argument' ? 'This copy is read-only for you.' : 'Sync failed, will retry on next change.', 4000))
-          .finally(() => pending--);
-      }
-    };
-    const pull = async () => {
-      const snap = await col.get();
-      if (snap.empty) return false;
-      for (const d of snap.docs) written[d.id] = JSON.stringify(d.data());
-      const st = migrate(fromDocs(snap.docs));
-      if (st && JSON.stringify(st) !== JSON.stringify(S)) { S = st; bump(); resetFmt(); applyTheme(); generateRecurring(); render(); }
-      return true;
-    };
-    Cloud = { schedule() { clearTimeout(timer); timer = setTimeout(flush, 500); }, pull };
-    const had = await pull();
-    if (!had && (S.tx.length || S.recurring.length)) flush(); // first run: upload the local copy
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && !pending) pull().catch(() => { }); });
-    if (view.tab === 'settings') render();
-  } catch (e) { console.warn('cloud store unavailable', e); Cloud = null; }
-}
 
 let S = migrate(Store.load()) || freshState();
 function migrate(s) {
@@ -128,7 +72,7 @@ function migrate(s) {
 }
 const save = () => { bump(); Store.save(S); };
 
-const view = { tab: 'home', kind: 'month', anchor: new Date(), filterCat: '', search: '' };
+const view = { tab: 'home', kind: 'month', anchor: new Date(), filterCat: '', search: '', allCats: false, openSecs: new Set() };
 
 /* ---------------- formatting ---------------- */
 let _fmt = {};
@@ -471,20 +415,7 @@ Rules:
 - If data is insufficient, say exactly what to log.
 - No generic disclaimers.`;
 
-const useClaude = () => HOSTED && S.settings.ai.provider !== 'local';
-async function claudeChat(messages, onToken, signal) {
-  const sample = await window.claude.use('sample');
-  if (!sample) throw new Error('Claude is not available in this view');
-  const [sys, ...rest] = messages;
-  const convo = rest.map(m => `${m.role === 'user' ? 'USER' : 'COACH'}: ${m.content}`).join('\n\n');
-  const prompt = `${sys.content}\n\nCONVERSATION SO FAR (answer the last USER message):\n${convo}`;
-  try {
-    const r = await sample(prompt, { cache: false, signal, modelTier: 'default', onText: ({ text }) => onToken(text) });
-    return r.text;
-  } catch (e) { const err = new Error(e.code === 'not_granted' ? 'permission to ask Claude was not given' : e.message || e.code); err.name = e.code === 'aborted' ? 'AbortError' : 'Error'; throw err; }
-}
 async function llmChat(messages, onToken, signal) {
-  if (useClaude()) return claudeChat(messages, onToken, signal);
   const ai = S.settings.ai;
   const base = ai.url.replace(/\/+$/, '').replace(/\/v1$/, '');
   const res = await fetch(base + '/v1/chat/completions', {
@@ -601,11 +532,9 @@ function ask(msg, ok = 'Confirm', danger = true) {
   }));
 }
 const insHTML = i => `<div class="ins ${i.level}"><div class="i">${{ good: '✓', warn: '!', bad: '✕', info: 'i' }[i.level]}</div><div class="h">${esc(i.title)}</div><div class="b">${esc(i.text)}</div></div>`;
-const HOST_THEME = document.documentElement.dataset.theme;
 function applyTheme() {
   const t = S.settings.theme, el = document.documentElement;
   if (t !== 'auto') el.dataset.theme = t;
-  else if (HOST_THEME) el.dataset.theme = HOST_THEME;
   else if (Store.native && window.AndroidBridge.isNightMode) el.dataset.theme = window.AndroidBridge.isNightMode() ? 'dark' : 'light';
   else el.removeAttribute('data-theme');
 }
@@ -617,7 +546,7 @@ function render() {
   $$('.seg button').forEach(b => b.classList.toggle('on', b.dataset.kind === view.kind));
   $$('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === view.tab));
   document.body.classList.toggle('hide-period', view.tab === 'settings');
-  $('#title').textContent = { home: 'Expenses', history: 'History', insights: 'AI Insights', settings: 'Settings' }[view.tab];
+  $('#title').hidden = view.tab !== 'settings';
   $('#fab').hidden = view.tab === 'settings';
   const v = $('#view');
   ({ home: renderHome, history: renderHistory, insights: renderInsights, settings: renderSettings })[view.tab](v, r);
@@ -645,7 +574,10 @@ function renderHome(v, r) {
   </div>`;
 
   // top insights
-  const ins = insights(r).filter(i => i.key !== 'vsPrev' && (i.level !== 'good' || i.score > 25)).slice(0, 3);
+  const all = insights(r).filter(i => i.key !== 'vsPrev');
+  const bad = all.filter(i => i.level === 'bad' || i.level === 'warn'), good = all.filter(i => i.level === 'good');
+  const ins = [...bad.slice(0, 2), ...good.slice(0, 1)];
+  if (ins.length < 3) ins.push(...all.filter(i => i.level === 'info').slice(0, 3 - ins.length)); // never a third warning
   if (ins.length && S.tx.length) html += `<div class="card"><h2>Insights <small>tap AI tab for more</small></h2>${ins.map(insHTML).join('')}</div>`;
 
   // trend chart
@@ -681,7 +613,8 @@ function renderHome(v, r) {
   const maxV = Math.max(1, ...rows.map(x => Math.max(x.amt, x.b)));
   const frac = r.isCurrent ? r.elapsed / r.days : 1;
   html += `<div class="card"><h2>By category <small>bar = spent · line = budget</small></h2>`;
-  html += rows.length ? rows.map(({ c, amt, b, prev }) => {
+  const shown = view.allCats ? rows : rows.slice(0, 6);
+  html += rows.length ? shown.map(({ c, amt, b, prev }) => {
     const st = !b ? '' : amt > b ? 'over' : (amt / b > frac + 0.15 && amt / b > 0.5 && isVariableCat(ex, c.id)) ? 'risk' : '';
     const badge = !b ? '' : st === 'over' ? `<span class="badge bad">✕ Over ${money(amt - b)}</span>` : st === 'risk' ? `<span class="badge warn">! ${Math.round(amt / b * 100)}% used</span>` : `<span class="badge good">✓ ${money(b - amt)} left</span>`;
     const d = prev ? amt / prev - 1 : null;
@@ -689,6 +622,7 @@ function renderHome(v, r) {
       <div class="track"><div class="fill ${st}" style="width:${amt / maxV * 100}%"></div>${b ? `<div class="mark" style="left:calc(${b / maxV * 100}% - 1px)"></div>` : ''}</div>
       <div class="meta"><span>${total ? Math.round(amt / total * 100) + '% of total' : ''}${d !== null && amt ? ` · ${pct(d)} vs prev` : ''}</span>${badge}</div></div>`;
   }).join('') : '<div class="empty">No expenses in this period.<br>Tap + to add one.</div>';
+  if (rows.length > 6) html += `<button class="btn sm more" id="allcats">${view.allCats ? 'Show top 6' : `Show all ${rows.length} categories`}</button>`;
   html += '</div>';
 
   // quarterly table (category x month) for quarter / year
@@ -704,6 +638,7 @@ function renderHome(v, r) {
   v.innerHTML = html;
   $$('.chart', v).forEach(bindTips);
   $$('.catrow', v).forEach(el => el.onclick = () => { view.tab = 'history'; view.filterCat = el.dataset.cat; render(); });
+  if ($('#allcats', v)) $('#allcats', v).onclick = () => { view.allCats = !view.allCats; render(); };
 }
 
 function renderHistory(v, r) {
@@ -732,7 +667,7 @@ function renderInsights(v, r) {
   const ins = insights(r);
   const ai = S.settings.ai;
   let html = `<div class="card"><h2>Analysis · ${esc(r.label)} <small>on-device rules</small></h2>${ins.map(insHTML).join('') || '<div class="empty">No data yet.</div>'}</div>`;
-  html += `<div class="card"><h2>Ask your AI coach <small>${useClaude() ? 'Claude' : 'local LLM'}</small></h2>
+  html += `<div class="card"><h2>Ask your AI coach <small>local LLM</small></h2>
     <div class="aistat"><span class="dot" id="aidot"></span><span id="aitxt">Checking ${esc(ai.url)} …</span></div>
     <div class="chips" style="margin:10px 0">
       ${['Review my spending this period and give me 3 concrete cuts.', 'Build a realistic monthly budget from my last 3 months.', 'How much can I save per month if I fix my top 2 problem areas?', 'Compare this quarter with last quarter.'].map(p => `<button class="chip qp">${esc(p)}</button>`).join('')}
@@ -742,10 +677,7 @@ function renderInsights(v, r) {
     <div class="btns"><button class="btn sm" id="cclr">Clear chat</button><button class="btn sm" id="csetup">AI setup help</button></div>
   </div>`;
   v.innerHTML = html;
-  if (useClaude()) {
-    $('#aidot', v).classList.add('ok');
-    $('#aitxt', v).textContent = 'Using Claude via claude.ai (asks permission on first use). Switch to a local model in Settings.';
-  } else llmModels().then(ms => { $('#aidot', v)?.classList.add('ok'); const t = $('#aitxt', v); if (t) t.textContent = `Connected · ${ai.model}${ms.length && !ms.includes(ai.model) ? ' (⚠ not in server model list: ' + ms.slice(0, 3).join(', ') + ')' : ''}`; })
+  llmModels().then(ms => { $('#aidot', v)?.classList.add('ok'); const t = $('#aitxt', v); if (t) t.textContent = `Connected · ${ai.model}${ms.length && !ms.includes(ai.model) ? ' (⚠ not in server model list: ' + ms.slice(0, 3).join(', ') + ')' : ''}`; })
     .catch(() => { $('#aidot', v)?.classList.add('no'); const t = $('#aitxt', v); if (t) t.textContent = 'No local LLM reachable — rule-based analysis above still works. Tap "AI setup help".'; });
   const send = async (text) => {
     if (!text.trim()) return;
@@ -761,7 +693,7 @@ function renderInsights(v, r) {
       const out = await llmChat(msgs, full => { pend.innerHTML = md(full); }, chatAbort.signal);
       S.chat.push({ role: 'assistant', content: out || '(empty response)' });
     } catch (e) {
-      const msg = e.name === 'AbortError' ? 'Stopped.' : useClaude() ? `Claude could not answer: ${e.message}.` : `Could not reach the local AI at ${ai.url} (${e.message}). See "AI setup help".`;
+      const msg = e.name === 'AbortError' ? 'Stopped.' : `Could not reach the local AI at ${ai.url} (${e.message}). See "AI setup help".`;
       pend.innerHTML = `<p>${esc(msg)}</p>`; S.chat.pop();
     }
     pend.removeAttribute('id'); chatAbort = null;
@@ -802,34 +734,37 @@ function renderSettings(v) {
     <div><label class="f">Number format</label><select id="sloc">${['en-IN', 'en-US', 'en-GB', 'de-DE', 'fr-FR', 'ja-JP'].map(l => `<option ${l === st.locale ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
     <label class="f">Monthly take-home income (used when no income entries exist)</label><input id="sinc" type="number" inputmode="decimal" value="${st.income || ''}" placeholder="e.g. 85000">
     <div class="row"><div><label class="f">Quarter / year starts</label><select id="sfy"><option value="0" ${+st.fyStart === 0 ? 'selected' : ''}>January (calendar)</option><option value="3" ${+st.fyStart === 3 ? 'selected' : ''}>April (Indian FY)</option></select></div>
-    <div><label class="f">Theme</label><select id="sth">${['auto', 'light', 'dark'].map(t => `<option ${t === st.theme ? 'selected' : ''}>${t}</option>`).join('')}</select></div></div>
+    <div><label class="f">Theme</label><select id="sth">${[['auto', 'Follow system'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => `<option value="${k}" ${k === st.theme ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
   </div>
-  <div class="card"><h2>Categories & monthly budgets</h2>
+  <details class="card" data-sec="cats"><summary><h2>Categories & monthly budgets <small>${money(budgetTotal())}/mo</small></h2></summary>
     <div class="setcat sub"><span></span><span>Name</span><span>Budget/mo</span><span>Type</span></div>
     ${S.categories.map((c, i) => `<div class="setcat" data-i="${i}"><input class="ci" value="${esc(c.icon)}" maxlength="4" style="text-align:center;padding:7px 2px"><input class="cn" value="${esc(c.name)}"><input class="cb" type="number" inputmode="decimal" value="${c.budget || ''}" placeholder="0"><select class="ck">${['need', 'want', 'save'].map(k => `<option ${k === c.kind ? 'selected' : ''}>${k}</option>`).join('')}</select></div>`).join('')}
     <div class="sub" style="margin-top:6px">Total monthly budget: <b>${money(budgetTotal())}</b>${st.income ? ` · ${Math.round(budgetTotal() / st.income * 100)}% of income` : ''}</div>
     <div class="btns"><button class="btn sm" id="addcat">+ Add category</button><button class="btn sm" id="sugb">Suggest budgets from history</button></div>
-  </div>
-  <div class="card"><h2>Recurring</h2>
+  </details>
+  <details class="card" data-sec="rec"><summary><h2>Recurring <small>${S.recurring.length} active</small></h2></summary>
     ${S.recurring.length ? S.recurring.map(rc => `<div class="catrow"><div class="ic">${rc.type === 'income' ? '💰' : catOf(rc.cat).icon}</div><div class="nm">${esc(rc.note || catOf(rc.cat).name)} <span class="muted">· day ${rc.day}</span></div><div class="amt">${money(rc.amount)} <button class="btn sm danger delrec" data-id="${rc.id}">✕</button></div></div>`).join('') : '<div class="sub">Rent, EMIs, salary, subscriptions — add them once when adding an entry (tick "Repeat monthly").</div>'}
-  </div>
-  <div class="card"><h2>AI coach</h2>
-    ${HOSTED ? `<label class="f">AI engine</label><select id="aprov"><option value="auto" ${st.ai.provider !== 'local' ? 'selected' : ''}>Claude (via claude.ai)</option><option value="local" ${st.ai.provider === 'local' ? 'selected' : ''}>Local server (Ollama / llama.cpp)</option></select>
-    <div class="sub" style="margin-top:6px">This hosted page can't reach servers on your device or network, so a local model only works in the Android app or a self-hosted copy.</div>` : ''}
+  </details>
+  <details class="card" data-sec="ai"><summary><h2>AI coach <small>local model</small></h2></summary>
     <label class="f">Local server URL (OpenAI-compatible)</label><input id="aurl" value="${esc(st.ai.url)}" placeholder="http://127.0.0.1:11434">
     <div class="row"><div><label class="f">Model</label><input id="amod" value="${esc(st.ai.model)}" list="amods"><datalist id="amods"></datalist></div>
     <div><label class="f">API key (optional)</label><input id="akey" type="password" value="${esc(st.ai.key)}"></div></div>
     <div class="btns"><button class="btn sm" id="atest">Test connection</button><button class="btn sm" id="ahelp">Setup help</button></div>
     <div class="sub" id="ares" style="margin-top:8px"></div>
-  </div>
-  <div class="card"><h2>Your data</h2>
-    <div class="sub">${S.tx.length} entries stored ${Store.native ? 'in app storage on this phone' : Cloud ? 'in your private claude.ai storage (only you can see it, synced across your devices)' : 'in this browser only'}. Export regularly — uninstalling the app deletes its data.</div>
+  </details>
+  <details class="card" data-sec="data"><summary><h2>Backup & data <small>${S.tx.length} entries</small></h2></summary>
+    <div class="sub">${S.tx.length} entries stored ${Store.native ? 'only on this phone' : 'only in this browser'}. Export regularly — uninstalling the app deletes its data.</div>
     <div class="btns"><button class="btn sm" id="exj">Export backup (JSON)</button><button class="btn sm" id="exc">Export CSV</button></div>
     <div class="btns"><button class="btn sm" id="imj">Import backup</button><button class="btn sm" id="demo">Load demo data</button></div>
     <div class="btns"><button class="btn sm danger" id="undemo">Remove demo data</button><button class="btn sm danger" id="wipe">Delete everything</button></div>
     <input type="file" id="impf" accept=".json,application/json" hidden>
-  </div>
-  <p class="sub" style="text-align:center">Local Expense Tracker v${APP_VERSION} · open source · no tracking</p>`;
+  </details>
+  <p class="sub" style="text-align:center">Expense Tracker v${APP_VERSION} · open source · no tracking<br>
+    <a href="https://github.com/shashank23088/expense_tracker_app/releases">Updates &amp; source on GitHub</a></p>`;
+  $$('details[data-sec]', v).forEach(d => {
+    d.open = view.openSecs.has(d.dataset.sec);
+    d.ontoggle = () => { d.open ? view.openSecs.add(d.dataset.sec) : view.openSecs.delete(d.dataset.sec); };
+  });
 
   const g = id => $('#' + id, v);
   g('scur').onchange = e => { st.currency = e.target.value.toUpperCase().trim() || 'INR'; resetFmt(); save(); };
@@ -857,7 +792,6 @@ function renderSettings(v) {
   $$('.delrec', v).forEach(b => b.onclick = async () => { if (!await ask('Stop this recurring entry? Past entries are kept.', 'Stop repeating')) return; S.recurring = S.recurring.filter(x => x.id !== b.dataset.id); save(); render(); });
   const saveAI = () => { st.ai.url = g('aurl').value.trim(); st.ai.model = g('amod').value.trim(); st.ai.key = g('akey').value; save(); };
   ['aurl', 'amod', 'akey'].forEach(id => g(id).onchange = saveAI);
-  if (g('aprov')) g('aprov').onchange = e => { st.ai.provider = e.target.value; save(); };
   g('atest').onclick = async () => {
     saveAI(); g('ares').textContent = 'Testing…';
     try { const ms = await llmModels(); g('ares').innerHTML = `✓ Connected. Models: ${esc(ms.join(', ') || '(none listed)')}`; g('amods').innerHTML = ms.map(m => `<option value="${esc(m)}">`).join(''); if (ms.length && !ms.includes(st.ai.model)) g('ares').innerHTML += `<br>⚠ "${esc(st.ai.model)}" not found — pick one of the above.`; }
@@ -892,13 +826,6 @@ function exportFile(name, mime, text) {
     else { window.AndroidBridge.share(name, text); }
     return;
   }
-  if (HOSTED) {
-    window.claude.use('downloads').then(dl => {
-      if (!dl) return toast('Downloads are not available in this view.');
-      return dl.save({ filename: name, data: text }).then(() => toast('Saved ' + name), e => e.code !== 'declined' && toast('Could not save: ' + e.code));
-    });
-    return;
-  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type: mime })); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -907,14 +834,25 @@ function exportFile(name, mime, text) {
 /* ---------------- add / edit ---------------- */
 function editTx(t) {
   const isNew = !t;
-  const lastCat = S._lastCat || 'food';
-  t = t ? { ...t } : { id: uid(), type: 'expense', amount: '', cat: lastCat, date: todayStr(), note: '' };
-  const catChips = () => S.categories.map(c => `<button class="chip ${c.id === t.cat ? 'on' : ''}" data-c="${esc(c.id)}">${c.icon} ${esc(c.name)}</button>`).join('');
+  // no preselected category: a silent default files entries under the wrong one
+  t = t ? { ...t } : { id: uid(), type: 'expense', amount: '', cat: '', date: todayStr(), note: '' };
+  // most-used categories (last 90 days) first; the rest behind "More"
+  const since = ymd(new Date(Date.now() - 90 * 864e5)), uses = {};
+  for (const x of S.tx) if (x.type === 'expense' && x.date >= since) uses[x.cat] = (uses[x.cat] || 0) + 1;
+  const ordered = [...S.categories].sort((a, b) => (uses[b.id] || 0) - (uses[a.id] || 0));
+  const TOP = 8;
+  let showAll = ordered.findIndex(c => c.id === t.cat) >= TOP;
+  const catChips = () => (showAll ? ordered : ordered.slice(0, TOP)).map(c => `<button class="chip ${c.id === t.cat ? 'on' : ''}" data-c="${esc(c.id)}">${c.icon} ${esc(c.name)}</button>`).join('')
+    + (!showAll && ordered.length > TOP ? `<button class="chip ghost" data-more="1">More…</button>` : '');
+  const yday = ymd(new Date(Date.now() - 864e5));
+  const shortDay = d => { const x = parseD(d); return `${x.getDate()} ${MONTHS[x.getMonth()]}${x.getFullYear() !== new Date().getFullYear() ? ' ' + x.getFullYear() : ''}`; };
   openSheet(`<h3>${isNew ? 'Add entry' : 'Edit entry'}</h3>
     <div class="seg" style="margin:6px 0 4px"><button data-t="expense" class="${t.type === 'expense' ? 'on' : ''}">Expense</button><button data-t="income" class="${t.type === 'income' ? 'on' : ''}">Income</button></div>
     <input id="ea" class="amount-in num" type="number" inputmode="decimal" step="any" placeholder="${esc(money(0))}" value="${t.amount}">
     <div id="ecw"><label class="f">Category</label><div class="chips" id="ec">${catChips()}</div></div>
-    <div class="row"><div><label class="f">Date</label><input id="ed" type="date" value="${t.date}" max="${todayStr()}"></div></div>
+    <label class="f">Date</label>
+    <div class="chips" id="edc"><button class="chip" data-d="${todayStr()}">Today</button><button class="chip" data-d="${yday}">Yesterday</button>
+      <span class="chip datepick" id="edp"><span id="edl"></span><input id="ed" type="date" value="${t.date}" max="${todayStr()}" aria-label="Pick a date"></span></div>
     <label class="f">Note</label><input id="en" value="${esc(t.note)}" placeholder="e.g. Swiggy dinner, Uber to office">
     ${isNew ? `<label class="toggle"><input type="checkbox" id="er"> Repeat monthly on this day (rent, EMI, salary, subscriptions)</label>` : ''}
     <div class="btns">${isNew ? '' : '<button class="btn danger" id="edel">Delete</button>'}<button class="btn" id="ecan">Cancel</button><button class="btn pri" id="esave">Save</button></div>`, b => {
@@ -922,13 +860,29 @@ function editTx(t) {
     const syncType = () => { ecw.hidden = t.type === 'income'; $$('.seg button', b).forEach(x => x.classList.toggle('on', x.dataset.t === t.type)); };
     syncType();
     $$('.seg button', b).forEach(x => x.onclick = () => { t.type = x.dataset.t; syncType(); });
-    ec.onclick = e => { const c = e.target.closest('[data-c]'); if (!c) return; t.cat = c.dataset.c; $$('.chip', ec).forEach(x => x.classList.toggle('on', x === c)); };
+    ec.onclick = e => {
+      if (e.target.closest('[data-more]')) { showAll = true; ec.innerHTML = catChips(); return; }
+      const c = e.target.closest('[data-c]'); if (!c) return;
+      t.cat = c.dataset.c; ecw.classList.remove('need'); $$('.chip', ec).forEach(x => x.classList.toggle('on', x === c));
+    };
+    const ed = $('#ed', b);
+    const syncDate = () => {
+      const d = ed.value || todayStr(), other = d !== todayStr() && d !== yday;
+      $$('#edc [data-d]', b).forEach(x => x.classList.toggle('on', x.dataset.d === d));
+      $('#edp', b).classList.toggle('on', other);
+      $('#edl', b).textContent = other ? '📅 ' + shortDay(d) : '📅 Other day';
+    };
+    $$('#edc [data-d]', b).forEach(x => x.onclick = () => { ed.value = x.dataset.d; syncDate(); });
+    ed.onchange = syncDate;
+    ed.onclick = () => { try { ed.showPicker(); } catch { } };
+    syncDate();
     setTimeout(() => $('#ea', b).focus(), 50);
     $('#ecan', b).onclick = closeSheet;
     if (!isNew) $('#edel', b).onclick = async () => { if (!await ask(`Delete ${money(+t.amount)} ${t.type === 'income' ? 'income' : catOf(t.cat).name} entry?`, 'Delete')) return; S.tx = S.tx.filter(x => x.id !== t.id); save(); render(); };
     $('#esave', b).onclick = () => {
       const amt = parseFloat($('#ea', b).value);
-      if (!(amt > 0)) { toast('Enter an amount'); return; }
+      if (!(amt > 0)) { toast('Enter an amount'); $('#ea', b).focus(); return; }
+      if (t.type === 'expense' && !t.cat) { toast('Pick a category'); ecw.classList.add('need'); return; }
       t.amount = Math.round(amt * 100) / 100; t.date = $('#ed', b).value || todayStr(); t.note = $('#en', b).value.trim();
       if (t.type === 'income') t.cat = 'income';
       if (isNew) {
@@ -937,7 +891,7 @@ function editTx(t) {
           const d = parseD(t.date); rc.next = ymd(new Date(d.getFullYear(), d.getMonth() + 1, 1)).slice(0, 7);
           t.recurId = rc.id; S.recurring.push(rc);
         }
-        S.tx.push(t); if (t.type === 'expense') S._lastCat = t.cat;
+        S.tx.push(t);
       } else S.tx = S.tx.map(x => x.id === t.id ? t : x);
       save(); closeSheet(); render(); toast(isNew ? `Added ${money(t.amount)}` : 'Saved');
     };
@@ -993,5 +947,4 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { ge
 applyTheme();
 generateRecurring();
 render();
-initCloud();
-if (!HOSTED && location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
+
