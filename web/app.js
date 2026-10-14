@@ -107,7 +107,7 @@ async function initCloud() {
       if (snap.empty) return false;
       for (const d of snap.docs) written[d.id] = JSON.stringify(d.data());
       const st = migrate(fromDocs(snap.docs));
-      if (st && JSON.stringify(st) !== JSON.stringify(S)) { S = st; resetFmt(); applyTheme(); generateRecurring(); render(); }
+      if (st && JSON.stringify(st) !== JSON.stringify(S)) { S = st; bump(); resetFmt(); applyTheme(); generateRecurring(); render(); }
       return true;
     };
     Cloud = { schedule() { clearTimeout(timer); timer = setTimeout(flush, 500); }, pull };
@@ -126,7 +126,7 @@ function migrate(s) {
   s.categories ||= f.categories; s.tx ||= []; s.recurring ||= []; s.chat ||= [];
   return s;
 }
-const save = () => Store.save(S);
+const save = () => { bump(); Store.save(S); };
 
 const view = { tab: 'home', kind: 'month', anchor: new Date(), filterCat: '', search: '' };
 
@@ -185,7 +185,24 @@ const prevRange = r => periodRange(r.kind, shiftAnchor(r.kind, parseD(r.start), 
 /* ---------------- aggregation ---------------- */
 const inRange = (t, r) => t.date >= r.start && t.date <= r.end;
 const sum = arr => arr.reduce((a, t) => a + t.amount, 0);
-const expIn = r => S.tx.filter(t => t.type === 'expense' && inRange(t, r));
+// Derived data is cached per data version; save() and any wholesale state swap call bump().
+let DATA_VER = 0;
+const memo = new Map();
+const bump = () => { DATA_VER++; memo.clear(); };
+function cached(key, f) {
+  const k = DATA_VER + '|' + todayStr() + '|' + key;
+  if (!memo.has(k)) memo.set(k, f());
+  return memo.get(k);
+}
+const expIn = r => cached('exp|' + r.start + '|' + r.end, () => S.tx.filter(t => t.type === 'expense' && inRange(t, r)));
+// typical (median) non-recurring spend per category over all history, computed once per data version
+const catStats = () => cached('catStats', () => {
+  const by = {};
+  for (const t of S.tx) if (t.type === 'expense' && !t.recurId) (by[t.cat] ||= []).push(t.amount);
+  const out = {};
+  for (const [c, a] of Object.entries(by)) out[c] = { med: median(a), n: a.length };
+  return out;
+});
 const incTxIn = r => S.tx.filter(t => t.type === 'income' && inRange(t, r));
 function byCat(txs) { const o = {}; for (const t of txs) o[t.cat] = (o[t.cat] || 0) + t.amount; return o; }
 function incomeFor(r) {
@@ -213,14 +230,13 @@ function prevComparable(r) {
 }
 // fixed/lumpy spend: recurring entries + one-off big items. Excluded from pace extrapolation.
 function splitFixed(ex) {
-  const all = S.tx.filter(t => t.type === 'expense' && !t.recurId);
-  const medByCat = {};
+  const st = catStats();
   let fixed = 0;
   for (const t of ex) {
     if (t.recurId) { fixed += t.amount; continue; }
-    medByCat[t.cat] ??= median(all.filter(x => x.cat === t.cat).map(x => x.amount));
     // a single item ≥3× the category's typical spend is a one-off, not a daily rate
-    if (t.amount >= medByCat[t.cat] * 3 && all.filter(x => x.cat === t.cat).length >= 3) fixed += t.amount;
+    const cs = st[t.cat];
+    if (cs && cs.n >= 3 && t.amount >= cs.med * 3) fixed += t.amount;
   }
   return { fixed, variable: sum(ex) - fixed };
 }
@@ -246,9 +262,10 @@ function generateRecurring() {
 }
 
 /* ---------------- insights engine (deterministic, offline) ---------------- */
-function insights(r) {
+function insights(r) { return cached('ins|' + r.kind + '|' + r.start, () => computeInsights(r)); }
+function computeInsights(r) {
   const out = [];
-  const add = (level, title, text, score = 0) => out.push({ level, title, text, score });
+  const add = (level, title, text, score = 0, key = '') => out.push({ level, title, text, score, key });
   const ex = expIn(r);
   const total = sum(ex);
   const pr = prevRange(r);
@@ -265,27 +282,32 @@ function insights(r) {
     const pc = prevComparable(r), cmpPrev = pc.total, note = pc.partial ? ` at the same point in ${pr.label}` : '';
     if (cmpPrev > 0) {
       const ch = total / cmpPrev - 1;
-      if (ch > 0.15) add('warn', `Spending up ${pct(ch)} vs ${pr.label}`, `${money(total)} so far vs ${money(cmpPrev)}${note}.`, 60 + ch * 20);
-      else if (ch < -0.1) add('good', `Spending down ${pct(ch)} vs ${pr.label}`, `${money(total)} vs ${money(cmpPrev)}${note}. Keep it up.`, 40);
+      if (ch > 0.15) add('warn', `Spending up ${pct(ch)} vs ${pr.label}`, `${money(total)} so far vs ${money(cmpPrev)}${note}.`, 60 + ch * 20, 'vsPrev');
+      else if (ch < -0.1) add('good', `Spending down ${pct(ch)} vs ${pr.label}`, `${money(total)} vs ${money(cmpPrev)}${note}. Keep it up.`, 40, 'vsPrev');
     }
   }
 
   // 2. pace / projection (current month)
-  const tb = budgetTotal() * r.months;
-  if (r.isCurrent && r.elapsed >= 3 && total > 0) {
-    const { fixed, variable } = splitFixed(ex);
-    const pendingRec = r.kind === 'month' ? S.recurring.filter(rc => rc.type === 'expense' && (rc.next || '') <= r.start.slice(0, 7)).reduce((a, rc) => a + rc.amount, 0) : 0;
+  // Investments (SIP etc.) are saving, not consumption: keep them out of the projection and its limit.
+  const isSave = cid => catOf(cid).kind === 'save';
+  const tb = S.categories.filter(c => c.kind !== 'save').reduce((a, c) => a + (+c.budget || 0), 0) * r.months;
+  const consumption = ex.filter(t => !isSave(t.cat));
+  const spent = sum(consumption);
+  if (r.isCurrent && r.elapsed >= 3 && spent > 0) {
+    const { fixed, variable } = splitFixed(consumption);
+    const pendingRec = r.kind === 'month' ? S.recurring.filter(rc => rc.type === 'expense' && !isSave(rc.cat) && (rc.next || '') <= r.start.slice(0, 7)).reduce((a, rc) => a + rc.amount, 0) : 0;
     const projected = fixed + pendingRec + variable / r.elapsed * r.days;
     const limit = tb || incomeFor({ ...r, isCurrent: false });
+    const excl = investedIn(ex) ? ' Investments are not counted as spending.' : '';
     if (limit > 0) {
       const lvl = projected > limit ? 'bad' : projected > limit * 0.9 ? 'warn' : 'good';
-      const what = tb ? 'budget' : 'income';
-      const dailyLeft = Math.max(0, (limit - total - pendingRec) / Math.max(1, r.days - r.elapsed));
-      add(lvl, `On track for ${money(projected)} this ${r.kind}`,
-        `That's ${Math.round(projected / limit * 100)}% of your ${what} (${money(limit)}). To stay within it, keep day-to-day spending under ${money(dailyLeft)}/day for the remaining ${r.days - r.elapsed} days.`,
+      const what = tb ? 'spending budget' : 'income';
+      const dailyLeft = Math.max(0, (limit - spent - pendingRec) / Math.max(1, r.days - r.elapsed));
+      add(lvl, `On track to spend ${money(projected)} this ${r.kind}`,
+        `That's ${Math.round(projected / limit * 100)}% of your ${what} (${money(limit)}). To stay within it, keep day-to-day spending under ${money(dailyLeft)}/day for the remaining ${r.days - r.elapsed} days.${excl}`,
         lvl === 'bad' ? 95 : lvl === 'warn' ? 70 : 30);
     } else {
-      add('info', `On track for ${money(projected)} this ${r.kind}`, 'Set category budgets or your monthly income in Settings to see whether that is OK.', 20);
+      add('info', `On track to spend ${money(projected)} this ${r.kind}`, `Set category budgets or your monthly income in Settings to see whether that is OK.${excl}`, 20);
     }
   }
 
@@ -344,27 +366,28 @@ function insights(r) {
 
   // 7. unusual transactions
   const unusual = [];
+  const st = catStats();
   for (const t of ex) {
     if (t.recurId) continue;
-    const hist = allExp.filter(x => x.cat === t.cat && x.id !== t.id && !x.recurId).map(x => x.amount);
-    if (hist.length < 5) continue;
-    const med = median(hist);
-    if (t.amount >= med * 3 && t.amount > total * 0.05) unusual.push({ t, med });
+    const cs = st[t.cat];
+    if (!cs || cs.n < 6) continue;
+    if (t.amount >= cs.med * 3 && t.amount > total * 0.05) unusual.push({ t, med: cs.med });
   }
   unusual.sort((a, b) => b.t.amount - a.t.amount).slice(0, 2).forEach(({ t, med }) =>
     add('info', `Unusually large: ${money(t.amount)} on ${catOf(t.cat).name}`, `${fmtDay(t.date)}${t.note ? ' — ' + t.note : ''}. Your typical ${catOf(t.cat).name.toLowerCase()} spend is ${money(med)}.`, 50));
 
-  // 8. small frequent spends ("leaks")
+  // 8. habit spends: the most frequent discretionary category (one card, not one per category)
   const days = Math.max(1, r.elapsed);
+  let habit = null;
   for (const [cid, amt] of Object.entries(bc)) {
-    const items = ex.filter(t => t.cat === cid && !t.recurId);
-    const c = catOf(cid);
-    if (c.kind !== 'want' || items.length < Math.max(6, days / 4)) continue;
-    const avgTicket = amt / items.length;
-    if (avgTicket < total * 0.02) {
-      const perMonth = amt / days * 30;
-      add('info', `${items.length} small ${c.name.toLowerCase()} spends added up to ${money(amt)}`, `Avg ${money(avgTicket)} each. Halving the count saves ~${money(perMonth / 2)}/month, ${money(perMonth * 6)}/year.`, 58);
-    }
+    const n = ex.filter(t => t.cat === cid && !t.recurId).length;
+    if (catOf(cid).kind !== 'want' || n < Math.max(6, days / 4)) continue;
+    if (!habit || amt > habit.amt) habit = { c: catOf(cid), amt, n };
+  }
+  if (habit) {
+    const perMonth = habit.amt / days * 30;
+    add('info', `${habit.n} ${habit.c.name.toLowerCase()} purchases in ${days} days`,
+      `${money(habit.amt)} total, ${money(habit.amt / habit.n)} each on average.${r.isCurrent ? ` At this pace that's ~${money(perMonth)} a month.` : ''} Doing it half as often saves ~${money(perMonth / 2)}/month (${money(perMonth * 6)}/year).`, 58);
   }
 
   // 9. weekend effect
@@ -583,6 +606,7 @@ function applyTheme() {
   const t = S.settings.theme, el = document.documentElement;
   if (t !== 'auto') el.dataset.theme = t;
   else if (HOST_THEME) el.dataset.theme = HOST_THEME;
+  else if (Store.native && window.AndroidBridge.isNightMode) el.dataset.theme = window.AndroidBridge.isNightMode() ? 'dark' : 'light';
   else el.removeAttribute('data-theme');
 }
 
@@ -621,7 +645,7 @@ function renderHome(v, r) {
   </div>`;
 
   // top insights
-  const ins = insights(r).filter(i => i.level !== 'good' || i.score > 25).slice(0, 3);
+  const ins = insights(r).filter(i => i.key !== 'vsPrev' && (i.level !== 'good' || i.score > 25)).slice(0, 3);
   if (ins.length && S.tx.length) html += `<div class="card"><h2>Insights <small>tap AI tab for more</small></h2>${ins.map(insHTML).join('')}</div>`;
 
   // trend chart
@@ -958,6 +982,7 @@ $('#nextP').onclick = () => { view.anchor = shiftAnchor(view.kind, view.anchor, 
 $('#fab').onclick = () => editTx(null);
 $('.sheet-backdrop').onclick = closeSheet;
 // Android back button: close sheet → go home → exit
+window.__onSystemTheme = applyTheme; // called by the APK when the system switches light/dark
 window.__onBack = () => {
   if (!$('#sheet').hidden) { closeSheet(); return true; }
   if (view.tab !== 'home') { view.tab = 'home'; render(); return true; }
