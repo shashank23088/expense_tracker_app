@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2a78d6">
+<title>Expense Tracker</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <h1 id="title">Expenses</h1>
+  <div class="period" id="periodBar">
+    <div class="seg" role="tablist" aria-label="Period type">
+      <button data-kind="month" class="on">Month</button>
+      <button data-kind="quarter">Quarter</button>
+      <button data-kind="year">Year</button>
+    </div>
+    <div class="nav">
+      <button id="prevP" aria-label="Previous period">‹</button>
+      <span id="periodLabel"></span>
+      <button id="nextP" aria-label="Next period">›</button>
+    </div>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<button id="fab" aria-label="Add expense">+</button>
+
+<nav class="tabs">
+  <button data-tab="home" class="on"><span>◔</span>Home</button>
+  <button data-tab="history"><span>☰</span>History</button>
+  <button data-tab="insights"><span>✦</span>AI</button>
+  <button data-tab="settings"><span>⚙</span>Settings</button>
+</nav>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-backdrop"></div>
+  <div class="sheet-body" role="dialog" aria-modal="true"></div>
+</div>
+<div id="tip" class="tip" hidden></div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
