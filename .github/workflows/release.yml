@@ -1,0 +1,42 @@
+# Push a tag like v1.2.0 -> builds a signed APK and publishes it as a GitHub Release.
+# Obtainium (or anyone) picks up new versions from the Releases page.
+name: Release APK
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Android build tools (Ubuntu packages, no Gradle)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            android-sdk-build-tools android-sdk-platform-23 apksigner zipalign aapt dalvik-exchange
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "::error::KEYSTORE_B64 secret is not set"; exit 1; fi
+          echo "$KEYSTORE_B64" | base64 -d > release.keystore
+
+      - name: Build APK
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          IFS=. read -r MA MI PA <<< "$V"
+          VERSION_NAME="$V" VERSION_CODE=$((MA * 10000 + MI * 100 + PA)) ./build.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/ExpenseTracker.apk --title "$GITHUB_REF_NAME" --generate-notes
