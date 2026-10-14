@@ -197,7 +197,8 @@ function generateRecurring() {
       const day = Math.min(rc.day, new Date(y, m + 1, 0).getDate());
       const d = new Date(y, m, day);
       if (d > today) break;
-      S.tx.push({ id: uid(), type: rc.type, amount: rc.amount, cat: rc.cat, date: ymd(d), note: rc.note, recurId: rc.id });
+      // entries generated from a demo recurring item are demo data too
+      S.tx.push({ id: uid(), type: rc.type, amount: rc.amount, cat: rc.cat, date: ymd(d), note: rc.note, recurId: rc.id, ...(rc.demo ? { demo: true } : {}) });
       added++; m++; if (m > 11) { m = 0; y++; }
     }
     rc.next = `${y}-${pad(m + 1)}`;
@@ -815,7 +816,14 @@ function renderSettings(v) {
     } catch (err) { toast('Import failed: ' + err.message); }
   };
   g('demo').onclick = () => { loadDemo(); render(); toast('Demo data added (6 months).'); };
-  g('undemo').onclick = () => { const n = S.tx.length; S.tx = S.tx.filter(t => !t.demo); S.recurring = S.recurring.filter(x => !x.demo); save(); render(); toast(`Removed ${n - S.tx.length} demo entries.`); };
+  g('undemo').onclick = () => {
+    // also catch entries that older versions generated from demo recurring items without the demo tag
+    const demoRec = new Set(S.recurring.filter(x => x.demo).map(x => x.id));
+    const n = S.tx.length;
+    S.tx = S.tx.filter(t => !t.demo && !demoRec.has(t.recurId));
+    S.recurring = S.recurring.filter(x => !x.demo);
+    save(); render(); toast(`Removed ${n - S.tx.length} demo entries.`);
+  };
   g('wipe').onclick = async () => { if (!await ask(`Delete all ${S.tx.length} entries, budgets and settings? This cannot be undone. Export a backup first.`, 'Delete everything')) return; S = freshState(); save(); resetFmt(); render(); };
 }
 
