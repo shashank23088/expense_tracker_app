@@ -34,11 +34,12 @@ App → Settings → AI coach: `http://127.0.0.1:11434`, model `qwen2.5:1.5b`.
 **On a PC (same Wi-Fi):** `OLLAMA_HOST=0.0.0.0 ollama serve`, `ollama pull qwen2.5:7b`, then URL `http://<PC-IP>:11434`.
 
 ## Releasing a new version
-```
-git tag v1.2.0 && git push origin v1.2.0
-```
-`.github/workflows/release.yml` builds and signs the APK and publishes it as a GitHub Release. Obtainium users get it automatically.
-It needs one repo secret, `KEYSTORE_B64` (`base64 -w0 release.keystore`), plus `KEYSTORE_PASSWORD` if the key isn't the default.
+On GitHub: **Releases → Draft a new release → Choose a tag → type `v1.2.0` → Create new tag → Publish release**
+(or `git tag v1.2.0 && git push origin v1.2.0`). `.github/workflows/release.yml` then builds and signs the APK and
+attaches it to the release, usually within about 2 minutes. Obtainium users get it automatically.
+
+It needs one repo secret, `KEYSTORE_B64` (output of `base64 -w0 release.keystore`), plus `KEYSTORE_PASSWORD` if the key's
+password isn't the default.
 
 ## Build locally
 `./build.sh` (Ubuntu) uses apt's Android SDK packages, with no Gradle or Android Studio. See the header of build.sh.

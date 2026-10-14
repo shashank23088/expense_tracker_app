@@ -1,13 +1,19 @@
-# Push a tag like v1.2.0 -> builds a signed APK and publishes it as a GitHub Release.
-# Obtainium (or anyone) picks up new versions from the Releases page.
+# Publish a release named like v1.2.0 on GitHub (Releases -> Draft a new release), or push a tag v1.2.0:
+# this builds a signed APK and attaches it to that release. Obtainium picks up new versions from Releases.
 name: Release APK
 
 on:
+  release:
+    types: [published]
   push:
     tags: ['v*.*.*']
 
 permissions:
   contents: write
+
+# creating a release in the UI can fire both events; run them one at a time per tag
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
 
 jobs:
   release:
@@ -31,12 +37,17 @@ jobs:
       - name: Build APK
         env:
           KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
-          V="${GITHUB_REF_NAME#v}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag must look like v1.2.3, got $TAG"; exit 1; }
+          V="${TAG#v}"
           IFS=. read -r MA MI PA <<< "$V"
           VERSION_NAME="$V" VERSION_CODE=$((MA * 10000 + MI * 100 + PA)) ./build.sh
 
-      - name: Publish release
+      - name: Attach APK to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/ExpenseTracker.apk --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" dist/ExpenseTracker.apk --clobber
