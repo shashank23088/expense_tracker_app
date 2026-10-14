@@ -176,6 +176,8 @@ input, select, textarea {
   padding: 10px 12px; outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .amount-in { font-size: 30px; font-weight: 650; text-align: center; padding: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 6px 10px; font-size: 13px; }
@@ -227,7 +229,9 @@ pre.help { white-space: pre-wrap; font-size: 12px; background: var(--surface-2);
   padding-bottom: env(safe-area-inset-bottom);
 }
 .tabs button { border: 0; background: none; padding: 8px 0 10px; font-size: 11px; color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.tabs button span { font-size: 18px; line-height: 1.2; }
+.tabs button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tabs button svg circle { fill: currentColor; stroke: none; }
+.tabs button[data-tab="settings"] svg circle { fill: var(--surface); stroke: currentColor; stroke-width: 1.8; }
 .tabs button.on { color: var(--accent); font-weight: 600; }
 
 /* sheet */

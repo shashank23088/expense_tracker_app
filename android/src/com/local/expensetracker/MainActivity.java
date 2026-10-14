@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -34,6 +35,7 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().setStatusBarColor(Color.parseColor("#2a78d6"));
         web = new WebView(this);
+        web.setBackgroundColor(isNight() ? Color.parseColor("#111110") : Color.parseColor("#f4f4f1")); // no white flash in dark mode
         setContentView(web);
 
         WebSettings s = web.getSettings();
@@ -87,6 +89,18 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** WebView's prefers-color-scheme follows the app theme (always light here), so JS asks this instead. */
+    private boolean isNight() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration c) {
+        super.onConfigurationChanged(c);
+        web.setBackgroundColor(isNight() ? Color.parseColor("#111110") : Color.parseColor("#f4f4f1"));
+        web.evaluateJavascript("window.__onSystemTheme && window.__onSystemTheme()", null);
+    }
+
     private File dataFile() { return new File(getFilesDir(), "data.json"); }
 
     private static String readAll(File f) throws Exception {
@@ -101,6 +115,9 @@ public class MainActivity extends Activity {
     }
 
     class Bridge {
+        @JavascriptInterface
+        public boolean isNightMode() { return isNight(); }
+
         @JavascriptInterface
         public String load() {
             try {
