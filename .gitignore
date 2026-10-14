@@ -1,0 +1,8 @@
+build/
+release.keystore
+*.keystore
+*.jks
+*.idsig
+dist/*.tar.gz
+dist/expense-tracker.html
+__pycache__/
